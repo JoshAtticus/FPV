@@ -106,14 +106,24 @@ fun HorizonCameraPanel() {
     }
 
     // --- State ---
-    var selectedMode by remember { mutableStateOf(CameraMode.PHOTO) }
-    var currentCameraId by remember { mutableStateOf("50") } 
+    val settings = remember { AppSettings(context) }
+    var selectedMode by remember { 
+        mutableStateOf(
+            if (settings.rememberMode) {
+                try { CameraMode.valueOf(settings.lastMode) } catch (e: Exception) { CameraMode.PHOTO }
+            } else {
+                CameraMode.PHOTO
+            }
+        ) 
+    }
+    var currentCameraId by remember { mutableStateOf(if (selectedMode == CameraMode.AVATAR) "1" else settings.defaultCamera) } 
     var isRecording by remember { mutableStateOf(false) }
 
     // Settings logic
     var showSettings by remember { mutableStateOf(false) }
     var selectedResolution by remember { mutableStateOf<Size?>(null) }
-    var availableResolutions by remember { mutableStateOf(emptyList<Size>()) }
+    var availableVideoResolutions by remember { mutableStateOf(emptyList<Size>()) }
+    var availablePhotoResolutions by remember { mutableStateOf(emptyList<Size>()) }
     var recordingDurationMillis by remember { mutableLongStateOf(0L) }
 
     // Helpers
@@ -153,39 +163,47 @@ fun HorizonCameraPanel() {
     }
 
     // Fetch Resolutions using Camera2
-    LaunchedEffect(currentCameraId, selectedMode) {
+    LaunchedEffect(currentCameraId, selectedMode, showSettings) {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
             val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             if (map != null) {
-                val sizes = if (selectedMode == CameraMode.VIDEO) {
-                    map.getOutputSizes(MediaRecorder::class.java)?.toList() ?: emptyList()
-                } else {
-                    map.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
-                }
-                // Sort by area descending
-                val sortedSizes = sizes.sortedByDescending { it.width * it.height }
-                availableResolutions = sortedSizes
-                if (selectedResolution == null || !sortedSizes.contains(selectedResolution)) {
+                val videoSizes = map.getOutputSizes(MediaRecorder::class.java)?.toList() ?: emptyList()
+                val photoSizes = map.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
+                
+                availableVideoResolutions = videoSizes.sortedByDescending { it.width * it.height }
+                availablePhotoResolutions = photoSizes.sortedByDescending { it.width * it.height }
+                
+                val sortedSizes = if (selectedMode == CameraMode.VIDEO) availableVideoResolutions else availablePhotoResolutions
+                
+                if (selectedMode == CameraMode.AVATAR) {
                     selectedResolution = sortedSizes.firstOrNull()
+                } else {
+                    val aspectRatio = if (selectedMode == CameraMode.VIDEO) settings.videoAspectRatio else settings.photoAspectRatio
+                    val filtered = filterResolutionsByAspectRatio(sortedSizes, aspectRatio)
+                    val index = if (selectedMode == CameraMode.VIDEO) settings.videoResolutionIndex else settings.photoResolutionIndex
+                    selectedResolution = filtered.getOrNull(index) ?: filtered.firstOrNull() ?: sortedSizes.firstOrNull()
                 }
             } else {
-                availableResolutions = emptyList()
+                availableVideoResolutions = emptyList()
+                availablePhotoResolutions = emptyList()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching resolutions", e)
-            availableResolutions = emptyList()
+            availableVideoResolutions = emptyList()
+            availablePhotoResolutions = emptyList()
         }
     }
 
     // Lens ID Logic
     LaunchedEffect(selectedMode) {
+        settings.lastMode = selectedMode.name
         if (selectedMode == CameraMode.AVATAR) {
             currentCameraId = "1"
         } else {
             if (currentCameraId == "1") {
-                currentCameraId = "50"
+                currentCameraId = settings.defaultCamera
             }
         }
     }
@@ -411,14 +429,20 @@ fun HorizonCameraPanel() {
     }
 
     if (showSettings) {
-        SettingsDialog(
-            currentResolution = selectedResolution,
-            availableResolutions = availableResolutions,
-            onResolutionSelected = { 
-                selectedResolution = it
-                performHaptic()
-            },
-            onDismiss = { showSettings = false }
+        SettingsScreen(
+            onDismiss = { showSettings = false },
+            availableVideoResolutions = availableVideoResolutions,
+            availablePhotoResolutions = availablePhotoResolutions,
+            onSettingsChanged = {
+                // Trigger a re-evaluation of the selected resolution
+                val sortedSizes = if (selectedMode == CameraMode.VIDEO) availableVideoResolutions else availablePhotoResolutions
+                if (selectedMode != CameraMode.AVATAR) {
+                    val aspectRatio = if (selectedMode == CameraMode.VIDEO) settings.videoAspectRatio else settings.photoAspectRatio
+                    val filtered = filterResolutionsByAspectRatio(sortedSizes, aspectRatio)
+                    val index = if (selectedMode == CameraMode.VIDEO) settings.videoResolutionIndex else settings.photoResolutionIndex
+                    selectedResolution = filtered.getOrNull(index) ?: filtered.firstOrNull() ?: sortedSizes.firstOrNull()
+                }
+            }
         )
     }
 }
@@ -452,53 +476,7 @@ fun ShutterButton(
     }
 }
 
-@Composable
-fun SettingsDialog(
-    currentResolution: Size?,
-    availableResolutions: List<Size>,
-    onResolutionSelected: (Size) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Settings") },
-        text = {
-            Column {
-                Text(
-                    text = "Resolution",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
 
-                if (availableResolutions.isEmpty()) {
-                    Text("No resolutions found.", style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    availableResolutions.forEach { size ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onResolutionSelected(size) } 
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = (currentResolution == size),
-                                onClick = { onResolutionSelected(size) }
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = "${size.width}x${size.height}")
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
-        }
-    )
-}
 
 class Camera2Controller(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -664,6 +642,7 @@ class Camera2Controller(private val context: Context) {
     }
 
     private fun setupMediaRecorder(resolution: Size) {
+        val settings = AppSettings(context)
         mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -680,14 +659,23 @@ class Camera2Controller(private val context: Context) {
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setOutputFile(nextVideoAbsolutePath)
-            setVideoEncodingBitRate(10000000)
+            
+            if (currentMode == CameraMode.AVATAR) {
+                setVideoEncodingBitRate(14000000)
+                setAudioEncodingBitRate(256000)
+                setAudioSamplingRate(48000)
+                setAudioChannels(2)
+            } else {
+                setVideoEncodingBitRate(settings.videoBitrate * 1000000)
+                setAudioEncodingBitRate(settings.audioBitrate)
+                setAudioSamplingRate(settings.audioSampleRate)
+                setAudioChannels(settings.audioChannels)
+            }
+            
             setVideoFrameRate(30)
             setVideoSize(resolution.width, resolution.height)
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            setAudioEncodingBitRate(256000)
-            setAudioSamplingRate(48000)
-            setAudioChannels(2)
             prepare()
         }
     }
