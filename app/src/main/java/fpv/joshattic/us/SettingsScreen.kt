@@ -431,7 +431,10 @@ fun filterResolutionsByAspectRatio(resolutions: List<Size>, aspectRatio: String)
     }
     
     return resolutions.filter { size ->
-        val ratio = size.width.toFloat() / size.height.toFloat()
-        abs(ratio - targetRatio) < 0.05f
+        val w = size.width.toFloat()
+        val h = size.height.toFloat()
+        val ratio1 = w / h
+        val ratio2 = h / w
+        abs(ratio1 - targetRatio) < 0.1f || abs(ratio2 - targetRatio) < 0.1f
     }.sortedByDescending { it.width * it.height }
 }
