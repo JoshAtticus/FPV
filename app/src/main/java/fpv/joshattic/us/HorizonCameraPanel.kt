@@ -272,13 +272,8 @@ fun HorizonCameraPanel() {
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        if (currentCameraId == "1") {
-                            scaleX = -1f
-                            scaleY = -1f
-                        } else {
-                            scaleX = 1f
-                            scaleY = 1f
-                        }
+                        scaleX = 1f
+                        scaleY = 1f
                     },
                 factory = { ctx ->
                     TextureView(ctx).apply {
