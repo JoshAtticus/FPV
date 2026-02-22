@@ -1,31 +1,29 @@
 package fpv.joshattic.us
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
+import android.hardware.camera2.*
+import android.media.ImageReader
+import android.media.MediaActionSound
+import android.media.MediaRecorder
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Size
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.MediaStoreOutputOptions
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
-import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
-import androidx.camera.video.VideoRecordEvent
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,11 +31,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.Landscape
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -52,26 +46,28 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.core.content.PermissionChecker
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.*
 
 private const val TAG = "HorizonCameraApp"
 private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
+
+enum class CameraMode(val label: String, val icon: ImageVector) {
+    PHOTO("Photo", Icons.Default.CameraAlt),
+    VIDEO("Video", Icons.Default.Videocam),
+    AVATAR("Avatar", Icons.Default.Person)
+}
 
 @Composable
 fun HorizonCameraPanel() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
     
-    // Camera Executor
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-
     // --- Permissions Handling ---
     val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
     if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
@@ -111,27 +107,112 @@ fun HorizonCameraPanel() {
 
     // --- State ---
     var selectedMode by remember { mutableStateOf(CameraMode.PHOTO) }
-    // Default to Left Eye (50) for Passthrough
     var currentCameraId by remember { mutableStateOf("50") } 
     var isRecording by remember { mutableStateOf(false) }
-    var isTimeLapseRunning by remember { mutableStateOf(false) }
-    
-    // Camera Use Cases
-    var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
-    var videoCapture: VideoCapture<Recorder>? by remember { mutableStateOf(null) }
-    var recording: Recording? by remember { mutableStateOf(null) }
+
+    // Settings logic
+    var showSettings by remember { mutableStateOf(false) }
+    var selectedResolution by remember { mutableStateOf<Size?>(null) }
+    var availableResolutions by remember { mutableStateOf(emptyList<Size>()) }
+    var recordingDurationMillis by remember { mutableLongStateOf(0L) }
+
+    // Helpers
+    val sound = remember { MediaActionSound() }
+    val vibrator = context.getSystemService(Vibrator::class.java)
+    val performHaptic = remember {
+        {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(50)
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        sound.load(MediaActionSound.SHUTTER_CLICK)
+        sound.load(MediaActionSound.START_VIDEO_RECORDING)
+        sound.load(MediaActionSound.STOP_VIDEO_RECORDING)
+        onDispose {
+            sound.release()
+        }
+    }
+
+    // Timer logic
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            val startTime = System.currentTimeMillis()
+            while (isRecording) {
+                recordingDurationMillis = System.currentTimeMillis() - startTime
+                delay(100)
+            }
+        } else {
+            recordingDurationMillis = 0L
+        }
+    }
+
+    // Fetch Resolutions using Camera2
+    LaunchedEffect(currentCameraId, selectedMode) {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            if (map != null) {
+                val sizes = if (selectedMode == CameraMode.VIDEO) {
+                    map.getOutputSizes(MediaRecorder::class.java)?.toList() ?: emptyList()
+                } else {
+                    map.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
+                }
+                // Sort by area descending
+                val sortedSizes = sizes.sortedByDescending { it.width * it.height }
+                availableResolutions = sortedSizes
+                if (selectedResolution == null || !sortedSizes.contains(selectedResolution)) {
+                    selectedResolution = sortedSizes.firstOrNull()
+                }
+            } else {
+                availableResolutions = emptyList()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching resolutions", e)
+            availableResolutions = emptyList()
+        }
+    }
 
     // Lens ID Logic
     LaunchedEffect(selectedMode) {
         if (selectedMode == CameraMode.AVATAR) {
-            // Avatar is exclusively ID 1
             currentCameraId = "1"
         } else {
-            // If switching AWAY from Avatar, default back to Left Eye (50) if we were on Avatar (1)
-            // If we were already on 50 or 51, stay there.
             if (currentCameraId == "1") {
                 currentCameraId = "50"
             }
+        }
+    }
+
+    // Camera Controller
+    val cameraController = remember { Camera2Controller(context) }
+    
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                cameraController.closeCamera()
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                if (selectedResolution != null) {
+                    cameraController.openCamera(currentCameraId, selectedResolution!!, selectedMode)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            cameraController.closeCamera()
+        }
+    }
+
+    LaunchedEffect(currentCameraId, selectedResolution, selectedMode) {
+        if (selectedResolution != null) {
+            cameraController.openCamera(currentCameraId, selectedResolution!!, selectedMode)
         }
     }
 
@@ -152,7 +233,7 @@ fun HorizonCameraPanel() {
                 NavigationRailItem(
                     selected = (selectedMode == mode),
                     onClick = {
-                        if (!isRecording && !isTimeLapseRunning) {
+                        if (!isRecording) {
                             selectedMode = mode
                         } 
                     },
@@ -163,39 +244,77 @@ fun HorizonCameraPanel() {
                             fontWeight = if (selectedMode == mode) FontWeight.Bold else FontWeight.Normal
                         ) 
                     },
-                    icon = { Icon(mode.icon, contentDescription = mode.label) },
+                    icon = { 
+                        Icon(
+                            mode.icon, 
+                            contentDescription = mode.label,
+                            tint = if (selectedMode == mode) Color.Yellow else Color.White
+                        ) 
+                    },
                     colors = NavigationRailItemDefaults.colors(
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color.White,
-                        indicatorColor = Color(0xFF333333),
-                        unselectedIconColor = Color.Gray,
-                        unselectedTextColor = Color.Gray
-                    ),
-                    enabled = !isRecording && !isTimeLapseRunning
+                        selectedIconColor = Color.Yellow,
+                        unselectedIconColor = Color.White,
+                        indicatorColor = Color.Transparent
+                    )
                 )
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
 
-        // --- Camera Preview & Controls ---
+        // --- Main Camera Area ---
         Box(
             modifier = Modifier
+                .fillMaxSize()
                 .weight(1f)
-                .fillMaxHeight()
-                .padding(16.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF121212))
         ) {
-            CameraPreviewWithMessage(
-                cameraId = currentCameraId,
-                mode = selectedMode,
-                onImageCaptureInit = { imageCapture = it },
-                onVideoCaptureInit = { videoCapture = it },
-                cameraExecutor = cameraExecutor
+            // Camera Preview
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        if (currentCameraId == "1") {
+                            scaleX = -1f
+                            scaleY = -1f
+                        } else {
+                            scaleX = 1f
+                            scaleY = 1f
+                        }
+                    },
+                factory = { ctx ->
+                    TextureView(ctx).apply {
+                        surfaceTextureListener = cameraController.surfaceTextureListener
+                        cameraController.textureView = this
+                    }
+                }
             )
-            
-            // --- Overlay Controls ---
-            
-            // Lens Switcher (Only if NOT Avatar mode)
+
+            // Top Center: Recording Timer
+            if (isRecording) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 24.dp)
+                        .background(Color(0x80000000), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .background(Color.Red, CircleShape)
+                    )
+                    val seconds = (recordingDurationMillis / 1000) % 60
+                    val minutes = (recordingDurationMillis / 1000) / 60
+                    Text(
+                        text = String.format(Locale.US, "%02d:%02d", minutes, seconds),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Top Right: Lens Switcher
             if (selectedMode != CameraMode.AVATAR) {
                 Row(
                     modifier = Modifier
@@ -212,14 +331,57 @@ fun HorizonCameraPanel() {
                             color = if (isSelected) Color.Yellow else Color.White,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
-                                .clickable { currentCameraId = id }
+                                .clickable { 
+                                    if (!isRecording) {
+                                        performHaptic()
+                                        currentCameraId = id 
+                                    }
+                                }
                                 .padding(8.dp)
                         )
                     }
                 }
             }
 
-            // Shutter Button Area
+            // Bottom Left: Settings & Stats
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                IconButton(onClick = { 
+                    if (!isRecording) {
+                        performHaptic()
+                        showSettings = true 
+                    }
+                }) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+                
+                Column {
+                    Text(
+                        text = if (selectedMode == CameraMode.VIDEO) "Video Mode" else "Photo Mode",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (selectedResolution != null) {
+                        Text(
+                            text = "${selectedResolution!!.width}x${selectedResolution!!.height}", 
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+
+            // Right Center: Shutter Button
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
@@ -228,45 +390,23 @@ fun HorizonCameraPanel() {
                 ShutterButton(
                     mode = selectedMode,
                     isRecording = isRecording,
-                    isTimeLapseRunning = isTimeLapseRunning,
                     onClick = {
+                        performHaptic()
                         when (selectedMode) {
-                            CameraMode.PHOTO -> capturePhoto(context, imageCapture, cameraExecutor)
+                            CameraMode.PHOTO, CameraMode.AVATAR -> {
+                                sound.play(MediaActionSound.SHUTTER_CLICK)
+                                cameraController.takePicture()
+                            }
                             CameraMode.VIDEO -> {
                                 if (isRecording) {
-                                    recording?.stop()
+                                    sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+                                    cameraController.stopRecording()
                                     isRecording = false
                                 } else {
-                                    val newRecording = captureVideo(context, videoCapture, cameraExecutor) { event ->
-                                        if (event is VideoRecordEvent.Finalize) {
-                                            isRecording = false
-                                        }
-                                    }
-                                    // captureVideo returns null if videoCapture is null
-                                    if (newRecording != null) {
-                                        recording = newRecording
-                                        isRecording = true
-                                    }
+                                    sound.play(MediaActionSound.START_VIDEO_RECORDING)
+                                    cameraController.startRecording()
+                                    isRecording = true
                                 }
-                            }
-                            CameraMode.TIME_LAPSE -> {
-                                isTimeLapseRunning = !isTimeLapseRunning
-                                if (isTimeLapseRunning) {
-                                    scope.launch {
-                                        while (isTimeLapseRunning) {
-                                            capturePhoto(context, imageCapture, cameraExecutor, isTimeLapse = true)
-                                            delay(2000) // 2 sec interval
-                                        }
-                                    }
-                                }
-                            }
-                            CameraMode.PANORAMA -> {
-                                capturePhoto(context, imageCapture, cameraExecutor)
-                                Toast.makeText(context, "Panorama (Standard Capture)", Toast.LENGTH_SHORT).show()
-                            }
-                            CameraMode.AVATAR -> {
-                                // Avatar mode can take photos too
-                                capturePhoto(context, imageCapture, cameraExecutor)
                             }
                         }
                     }
@@ -274,17 +414,28 @@ fun HorizonCameraPanel() {
             }
         }
     }
+
+    if (showSettings) {
+        SettingsDialog(
+            currentResolution = selectedResolution,
+            availableResolutions = availableResolutions,
+            onResolutionSelected = { 
+                selectedResolution = it
+                performHaptic()
+            },
+            onDismiss = { showSettings = false }
+        )
+    }
 }
 
 @Composable
 fun ShutterButton(
     mode: CameraMode,
     isRecording: Boolean,
-    isTimeLapseRunning: Boolean,
     onClick: () -> Unit
 ) {
-    val outerColor = if (isRecording || isTimeLapseRunning) Color.Red else Color.White
-    val innerColor = if (isRecording || isTimeLapseRunning) Color.Red else Color.White
+    val outerColor = if (isRecording) Color.Red else Color.White
+    val innerColor = if (isRecording) Color.Red else Color.White
     
     Box(
         contentAlignment = Alignment.Center,
@@ -292,13 +443,11 @@ fun ShutterButton(
             .size(80.dp)
             .clickable(onClick = onClick)
     ) {
-        // Ring
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .border(4.dp, outerColor, CircleShape)
         )
-        // Inner Circle
         Box(
             modifier = Modifier
                 .size(if (isRecording) 40.dp else 60.dp)
@@ -308,166 +457,326 @@ fun ShutterButton(
     }
 }
 
-@OptIn(ExperimentalCamera2Interop::class)
 @Composable
-fun CameraPreviewWithMessage(
-    cameraId: String,
-    mode: CameraMode,
-    onImageCaptureInit: (ImageCapture) -> Unit,
-    onVideoCaptureInit: (VideoCapture<Recorder>) -> Unit,
-    cameraExecutor: ExecutorService
+fun SettingsDialog(
+    currentResolution: Size?,
+    availableResolutions: List<Size>,
+    onResolutionSelected: (Size) -> Unit,
+    onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    
-    AndroidView(
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                // Fix for Avatar camera being inverted
-                // Using ID 1 for Avatar
-                if (cameraId == "1") {
-                    scaleY = -1f
-                } else {
-                    scaleY = 1f
-                }
-            },
-        factory = { ctx ->
-            PreviewView(ctx).apply {
-                // Use COMPATIBLE implementation mode to avoid surface issues on some devices
-                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                scaleType = PreviewView.ScaleType.FIT_CENTER
-            }
-        },
-        update = { previewView ->
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Settings") },
+        text = {
+            Column {
+                Text(
+                    text = "Resolution",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
 
-                // Filter logic to find EXACT camera ID string
-                val customCameraSelector = CameraSelector.Builder()
-                    .addCameraFilter { cameraInfos ->
-                        cameraInfos.filter {
-                            val info = Camera2CameraInfo.from(it)
-                            info.cameraId == cameraId
+                if (availableResolutions.isEmpty()) {
+                    Text("No resolutions found.", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    availableResolutions.forEach { size ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onResolutionSelected(size) } 
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (currentResolution == size),
+                                onClick = { onResolutionSelected(size) }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "${size.width}x${size.height}")
                         }
                     }
-                    .build()
-
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-                
-                // Determine use case based on mode
-                val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
-                
-                if (mode == CameraMode.VIDEO) {
-                     val recorder = Recorder.Builder()
-                        .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
-                        .build()
-                    val videoCap = VideoCapture.withOutput(recorder)
-                    useCases.add(videoCap)
-                    onVideoCaptureInit(videoCap)
-                } else {
-                    // Default to ImageCapture for Photo, TimeLapse, Panorama, Avatar
-                    val imageCap = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .build()
-                    useCases.add(imageCap)
-                    onImageCaptureInit(imageCap)
-                }
-
-                try {
-                    cameraProvider.unbindAll()
-                    if (cameraProvider.hasCamera(customCameraSelector)) {
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            customCameraSelector,
-                            *useCases.toTypedArray()
-                        )
-                    } else {
-                        Log.e(TAG, "Camera ID $cameraId not found.")
-                        Toast.makeText(context, "Camera ID $cameraId unavailable", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (exc: Exception) {
-                    Log.e(TAG, "Use case binding failed", exc)
-                }
-
-            }, ContextCompat.getMainExecutor(context))
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
         }
     )
 }
 
-// --- Actions ---
+class Camera2Controller(private val context: Context) {
+    private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
+    private var imageReader: ImageReader? = null
+    private var mediaRecorder: MediaRecorder? = null
+    
+    private var backgroundThread: HandlerThread? = null
+    private var backgroundHandler: Handler? = null
+    
+    var textureView: TextureView? = null
+    private var currentCameraId: String? = null
+    private var currentResolution: Size? = null
+    private var currentMode: CameraMode = CameraMode.PHOTO
+    
+    private var isRecordingVideo = false
+    private var nextVideoAbsolutePath: String? = null
 
-fun capturePhoto(context: Context, imageCapture: ImageCapture?, executor: ExecutorService, isTimeLapse: Boolean = false) {
-    val imageCapture = imageCapture ?: return
+    val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+            openCameraInternal()
+        }
+        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+    }
 
-    val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
-    val contentValues = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HorizonFPV")
+    fun openCamera(cameraId: String, resolution: Size, mode: CameraMode) {
+        currentCameraId = cameraId
+        currentResolution = resolution
+        currentMode = mode
+        if (textureView?.isAvailable == true) {
+            openCameraInternal()
         }
     }
 
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(
-        context.contentResolver,
-        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-        contentValues
-    ).build()
+    @SuppressLint("MissingPermission")
+    private fun openCameraInternal() {
+        closeCamera()
+        startBackgroundThread()
+        
+        val cameraId = currentCameraId ?: return
+        val resolution = currentResolution ?: return
+        
+        try {
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+                    startPreview()
+                }
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    cameraDevice = null
+                }
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    cameraDevice = null
+                }
+            }, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open camera", e)
+        }
+    }
 
-    imageCapture.takePicture(
-        outputOptions,
-        executor,
-        object : ImageCapture.OnImageSavedCallback {
-            override fun onError(exc: ImageCaptureException) {
-                Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
+    private fun startPreview() {
+        val camera = cameraDevice ?: return
+        val texture = textureView?.surfaceTexture ?: return
+        val resolution = currentResolution ?: return
+        
+        texture.setDefaultBufferSize(resolution.width, resolution.height)
+        val surface = Surface(texture)
+        
+        try {
+            val surfaces = mutableListOf<Surface>(surface)
+            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builder.addTarget(surface)
+            
+            if (currentMode == CameraMode.PHOTO || currentMode == CameraMode.AVATAR) {
+                imageReader = ImageReader.newInstance(resolution.width, resolution.height, ImageFormat.JPEG, 2).apply {
+                    setOnImageAvailableListener({ reader ->
+                        val image = reader.acquireLatestImage()
+                        image?.let {
+                            saveImage(it)
+                            it.close()
+                        }
+                    }, backgroundHandler)
+                }
+                surfaces.add(imageReader!!.surface)
+            } else if (currentMode == CameraMode.VIDEO) {
+                setupMediaRecorder(resolution)
+                surfaces.add(mediaRecorder!!.surface)
             }
 
-            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                val msg = "Photo capture succeeded: ${output.savedUri}"
-                if (!isTimeLapse) {
-                    // Toast on main thread
-                    ContextCompat.getMainExecutor(context).execute {
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    captureSession = session
+                    try {
+                        session.setRepeatingRequest(builder.build(), null, backgroundHandler)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start camera preview", e)
                     }
                 }
-                Log.d(TAG, msg)
-            }
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e(TAG, "Failed to configure camera session")
+                }
+            }, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start preview", e)
         }
-    )
-}
+    }
 
-fun captureVideo(
-    context: Context, 
-    videoCapture: VideoCapture<Recorder>?, 
-    executor: ExecutorService,
-    listener: (VideoRecordEvent) -> Unit
-): Recording? {
-    val videoCapture = videoCapture ?: return null
-    val recording = videoCapture.output
-        .prepareRecording(context, MediaStoreOutputOptions.Builder(
-            context.contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        ).build())
-        .apply {
-            if (PermissionChecker.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PermissionChecker.PERMISSION_GRANTED) {
-                withAudioEnabled()
-            }
+    private fun setupMediaRecorder(resolution: Size) {
+        mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(context)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
         }
-        .start(ContextCompat.getMainExecutor(context), listener)
         
-    return recording
-}
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/HorizonFPV")
+            }
+        }
+        
+        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+        val pfd = uri?.let { context.contentResolver.openFileDescriptor(it, "w") }
+        
+        mediaRecorder?.apply {
+            setAudioSource(MediaRecorder.AudioSource.MIC)
+            setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            if (pfd != null) {
+                setOutputFile(pfd.fileDescriptor)
+            }
+            setVideoEncodingBitRate(10000000)
+            setVideoFrameRate(30)
+            setVideoSize(resolution.width, resolution.height)
+            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            prepare()
+        }
+    }
 
-// --- Data Models ---
+    fun takePicture() {
+        val camera = cameraDevice ?: return
+        val session = captureSession ?: return
+        val reader = imageReader ?: return
+        
+        try {
+            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            builder.addTarget(reader.surface)
+            session.capture(builder.build(), null, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to take picture", e)
+        }
+    }
 
-enum class CameraMode(val label: String, val icon: ImageVector) {
-    PHOTO("Photo", Icons.Default.CameraAlt),
-    VIDEO("Video", Icons.Default.Videocam),
-    TIME_LAPSE("Time Lapse", Icons.Default.Timer),
-    AVATAR("Avatar", Icons.Default.Person),
-    PANORAMA("Panorama", Icons.Default.Landscape)
+    private fun saveImage(image: android.media.Image) {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HorizonFPV")
+            }
+        }
+        
+        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+        uri?.let {
+            context.contentResolver.openOutputStream(it)?.use { out ->
+                out.write(bytes)
+            }
+            Handler(context.mainLooper).post {
+                Toast.makeText(context, "Photo saved", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun startRecording() {
+        if (cameraDevice == null || !textureView!!.isAvailable || currentResolution == null) return
+        
+        try {
+            val builder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            val surfaces = mutableListOf<Surface>()
+            
+            val texture = textureView!!.surfaceTexture!!
+            texture.setDefaultBufferSize(currentResolution!!.width, currentResolution!!.height)
+            val previewSurface = Surface(texture)
+            surfaces.add(previewSurface)
+            builder.addTarget(previewSurface)
+            
+            val recorderSurface = mediaRecorder!!.surface
+            surfaces.add(recorderSurface)
+            builder.addTarget(recorderSurface)
+            
+            cameraDevice!!.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    captureSession = session
+                    try {
+                        session.setRepeatingRequest(builder.build(), null, backgroundHandler)
+                        mediaRecorder?.start()
+                        isRecordingVideo = true
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start recording", e)
+                    }
+                }
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e(TAG, "Failed to configure recording session")
+                }
+            }, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start recording", e)
+        }
+    }
+
+    fun stopRecording() {
+        if (!isRecordingVideo) return
+        isRecordingVideo = false
+        try {
+            captureSession?.stopRepeating()
+            captureSession?.abortCaptures()
+            mediaRecorder?.stop()
+            mediaRecorder?.reset()
+            
+            Handler(context.mainLooper).post {
+                Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
+            }
+            
+            // Restart preview
+            startPreview()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to stop recording", e)
+        }
+    }
+
+    fun closeCamera() {
+        try {
+            captureSession?.close()
+            captureSession = null
+            cameraDevice?.close()
+            cameraDevice = null
+            imageReader?.close()
+            imageReader = null
+            mediaRecorder?.release()
+            mediaRecorder = null
+            stopBackgroundThread()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing camera", e)
+        }
+    }
+
+    private fun startBackgroundThread() {
+        backgroundThread = HandlerThread("CameraBackground").also { it.start() }
+        backgroundHandler = Handler(backgroundThread!!.looper)
+    }
+
+    private fun stopBackgroundThread() {
+        backgroundThread?.quitSafely()
+        try {
+            backgroundThread?.join()
+            backgroundThread = null
+            backgroundHandler = null
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Error stopping background thread", e)
+        }
+    }
 }
