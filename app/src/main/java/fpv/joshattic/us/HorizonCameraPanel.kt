@@ -520,11 +520,65 @@ class Camera2Controller(private val context: Context) {
 
     val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+            configureTransform(width, height)
             openCameraInternal()
         }
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+            configureTransform(width, height)
+        }
         override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+    }
+
+    private fun configureTransform(viewWidth: Int, viewHeight: Int) {
+        val textureView = textureView ?: return
+        val resolution = currentResolution ?: return
+        val cameraId = currentCameraId ?: return
+
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val characteristics = manager.getCameraCharacteristics(cameraId)
+        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val displayRotation = (context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.rotation
+
+        val surfaceRotation = when (displayRotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+
+        val isFrontFacing = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+        val sign = if (isFrontFacing) 1 else -1
+        val rotationToApply = (sensorOrientation + sign * surfaceRotation + 360) % 360
+
+        val isSwapped = rotationToApply == 90 || rotationToApply == 270
+        val rotatedWidth = if (isSwapped) resolution.height else resolution.width
+        val rotatedHeight = if (isSwapped) resolution.width else resolution.height
+
+        val matrix = android.graphics.Matrix()
+        
+        // 1. Undo TextureView's implicit scaling to get a 1:1 mapping
+        matrix.setScale(
+            resolution.width.toFloat() / viewWidth.toFloat(),
+            resolution.height.toFloat() / viewHeight.toFloat(),
+            viewWidth / 2f,
+            viewHeight / 2f
+        )
+
+        // 2. Apply rotation
+        if (rotationToApply != 0) {
+            matrix.postRotate(rotationToApply.toFloat(), viewWidth / 2f, viewHeight / 2f)
+        }
+
+        // 3. Scale to fill the view (CENTER_CROP)
+        val scale = Math.max(
+            viewWidth.toFloat() / rotatedWidth.toFloat(),
+            viewHeight.toFloat() / rotatedHeight.toFloat()
+        )
+        matrix.postScale(scale, scale, viewWidth / 2f, viewHeight / 2f)
+
+        textureView.setTransform(matrix)
     }
 
     fun openCamera(cameraId: String, resolution: Size, mode: CameraMode) {
@@ -532,6 +586,7 @@ class Camera2Controller(private val context: Context) {
         currentResolution = resolution
         currentMode = mode
         if (textureView?.isAvailable == true) {
+            configureTransform(textureView!!.width, textureView!!.height)
             openCameraInternal()
         }
     }
