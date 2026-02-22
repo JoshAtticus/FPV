@@ -643,9 +643,6 @@ class Camera2Controller(private val context: Context) {
                     }, backgroundHandler)
                 }
                 surfaces.add(imageReader!!.surface)
-            } else if (currentMode == CameraMode.VIDEO) {
-                setupMediaRecorder(resolution)
-                surfaces.add(mediaRecorder!!.surface)
             }
 
             camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
@@ -675,24 +672,14 @@ class Camera2Controller(private val context: Context) {
         }
         
         val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/HorizonFPV")
-            }
-        }
-        
-        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
-        val pfd = uri?.let { context.contentResolver.openFileDescriptor(it, "w") }
+        val tempFile = java.io.File(context.cacheDir, "$name.mp4")
+        nextVideoAbsolutePath = tempFile.absolutePath
         
         mediaRecorder?.apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            if (pfd != null) {
-                setOutputFile(pfd.fileDescriptor)
-            }
+            setOutputFile(nextVideoAbsolutePath)
             setVideoEncodingBitRate(10000000)
             setVideoFrameRate(30)
             setVideoSize(resolution.width, resolution.height)
@@ -745,6 +732,8 @@ class Camera2Controller(private val context: Context) {
         if (cameraDevice == null || !textureView!!.isAvailable || currentResolution == null) return
         
         try {
+            setupMediaRecorder(currentResolution!!)
+            
             val builder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             val surfaces = mutableListOf<Surface>()
             
@@ -786,15 +775,48 @@ class Camera2Controller(private val context: Context) {
             captureSession?.abortCaptures()
             mediaRecorder?.stop()
             mediaRecorder?.reset()
+            mediaRecorder?.release()
+            mediaRecorder = null
             
-            Handler(context.mainLooper).post {
-                Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
-            }
+            saveVideoToMediaStore(nextVideoAbsolutePath)
+            nextVideoAbsolutePath = null
             
             // Restart preview
             startPreview()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop recording", e)
+        }
+    }
+
+    private fun saveVideoToMediaStore(videoPath: String?) {
+        if (videoPath == null) return
+        val file = java.io.File(videoPath)
+        if (!file.exists()) return
+
+        val name = file.name
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/HorizonFPV")
+            }
+        }
+
+        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+        uri?.let {
+            try {
+                context.contentResolver.openOutputStream(it)?.use { out ->
+                    java.io.FileInputStream(file).use { input ->
+                        input.copyTo(out)
+                    }
+                }
+                file.delete()
+                Handler(context.mainLooper).post {
+                    Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save video to MediaStore", e)
+            }
         }
     }
 
