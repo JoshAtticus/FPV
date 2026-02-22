@@ -676,7 +676,7 @@ class Camera2Controller(private val context: Context) {
         nextVideoAbsolutePath = tempFile.absolutePath
         
         mediaRecorder?.apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
+            setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setOutputFile(nextVideoAbsolutePath)
@@ -685,6 +685,9 @@ class Camera2Controller(private val context: Context) {
             setVideoSize(resolution.width, resolution.height)
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            setAudioEncodingBitRate(256000)
+            setAudioSamplingRate(48000)
+            setAudioChannels(2)
             prepare()
         }
     }
