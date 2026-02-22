@@ -37,6 +37,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -60,7 +61,8 @@ private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
 enum class CameraMode(val label: String, val icon: ImageVector) {
     PHOTO("Photo", Icons.Default.CameraAlt),
     VIDEO("Video", Icons.Default.Videocam),
-    AVATAR("Avatar", Icons.Default.Person)
+    AVATAR("Avatar", Icons.Default.Person),
+    SPATIAL("Spatial", Icons.Default.ViewInAr)
 }
 
 @Composable
@@ -206,6 +208,10 @@ fun HorizonCameraPanel() {
                 
                 if (selectedMode == CameraMode.AVATAR) {
                     selectedResolution = sortedSizes.firstOrNull()
+                } else if (selectedMode == CameraMode.SPATIAL) {
+                    // Force 16:9 max resolution for Spatial mode
+                    val filtered = filterResolutionsByAspectRatio(sortedSizes, "16:9")
+                    selectedResolution = filtered.firstOrNull() ?: sortedSizes.firstOrNull()
                 } else {
                     val aspectRatio = if (selectedMode == CameraMode.VIDEO) settings.videoAspectRatio else settings.photoAspectRatio
                     val filtered = filterResolutionsByAspectRatio(sortedSizes, aspectRatio)
@@ -311,6 +317,7 @@ fun HorizonCameraPanel() {
             modifier = Modifier
                 .fillMaxSize()
                 .weight(1f)
+                .clipToBounds() // Prevent camera preview from bleeding over the sidebar
         ) {
             // Camera Preview
             AndroidView(
@@ -355,7 +362,7 @@ fun HorizonCameraPanel() {
             }
 
             // Top Right: Lens Switcher
-            if (selectedMode != CameraMode.AVATAR) {
+            if (selectedMode != CameraMode.AVATAR && selectedMode != CameraMode.SPATIAL) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -433,7 +440,7 @@ fun HorizonCameraPanel() {
                     onClick = {
                         performHaptic()
                         when (selectedMode) {
-                            CameraMode.PHOTO, CameraMode.AVATAR -> {
+                            CameraMode.PHOTO, CameraMode.AVATAR, CameraMode.SPATIAL -> {
                                 sound.play(MediaActionSound.SHUTTER_CLICK)
                                 cameraController.takePicture()
                             }
@@ -510,6 +517,15 @@ class Camera2Controller(private val context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
+    
+    // Dual camera state for SPATIAL mode
+    private var cameraDeviceLeft: CameraDevice? = null
+    private var cameraDeviceRight: CameraDevice? = null
+    private var captureSessionLeft: CameraCaptureSession? = null
+    private var captureSessionRight: CameraCaptureSession? = null
+    private var imageReaderLeft: ImageReader? = null
+    private var imageReaderRight: ImageReader? = null
+    
     private var mediaRecorder: MediaRecorder? = null
     
     private var backgroundThread: HandlerThread? = null
@@ -601,8 +617,14 @@ class Camera2Controller(private val context: Context) {
         closeCamera()
         startBackgroundThread()
         
-        val cameraId = currentCameraId ?: return
         val resolution = currentResolution ?: return
+        
+        if (currentMode == CameraMode.SPATIAL) {
+            openDualCameras()
+            return
+        }
+        
+        val cameraId = currentCameraId ?: return
         
         try {
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -622,6 +644,214 @@ class Camera2Controller(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open camera", e)
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun openDualCameras() {
+        var leftOpened = false
+        var rightOpened = false
+
+        val checkBothOpened = {
+            if (leftOpened && rightOpened) {
+                startDualPreview()
+            }
+        }
+
+        try {
+            cameraManager.openCamera("50", object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDeviceLeft = camera
+                    leftOpened = true
+                    checkBothOpened()
+                }
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    cameraDeviceLeft = null
+                }
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    cameraDeviceLeft = null
+                }
+            }, backgroundHandler)
+
+            cameraManager.openCamera("51", object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDeviceRight = camera
+                    rightOpened = true
+                    checkBothOpened()
+                }
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    cameraDeviceRight = null
+                }
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    cameraDeviceRight = null
+                }
+            }, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open dual cameras", e)
+        }
+    }
+
+    private fun startDualPreview() {
+        val cameraLeft = cameraDeviceLeft ?: return
+        val cameraRight = cameraDeviceRight ?: return
+        val texture = textureView?.surfaceTexture ?: return
+        val resolution = currentResolution ?: return
+
+        texture.setDefaultBufferSize(resolution.width, resolution.height)
+        val surface = Surface(texture)
+
+        try {
+            // Setup Left Camera
+            val surfacesLeft = mutableListOf<Surface>(surface)
+            val builderLeft = cameraLeft.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builderLeft.addTarget(surface)
+
+            imageReaderLeft = ImageReader.newInstance(resolution.width, resolution.height, ImageFormat.JPEG, 2).apply {
+                setOnImageAvailableListener({ reader ->
+                    val image = reader.acquireLatestImage()
+                    image?.let {
+                        handleSpatialImage(it, isLeft = true)
+                    }
+                }, backgroundHandler)
+            }
+            surfacesLeft.add(imageReaderLeft!!.surface)
+
+            cameraLeft.createCaptureSession(surfacesLeft, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    captureSessionLeft = session
+                    try {
+                        session.setRepeatingRequest(builderLeft.build(), null, backgroundHandler)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start left camera preview", e)
+                    }
+                }
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e(TAG, "Failed to configure left camera session")
+                }
+            }, backgroundHandler)
+
+            // Setup Right Camera (No preview surface, just ImageReader)
+            val surfacesRight = mutableListOf<Surface>()
+            val builderRight = cameraRight.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+
+            imageReaderRight = ImageReader.newInstance(resolution.width, resolution.height, ImageFormat.JPEG, 2).apply {
+                setOnImageAvailableListener({ reader ->
+                    val image = reader.acquireLatestImage()
+                    image?.let {
+                        handleSpatialImage(it, isLeft = false)
+                    }
+                }, backgroundHandler)
+            }
+            surfacesRight.add(imageReaderRight!!.surface)
+            builderRight.addTarget(imageReaderRight!!.surface)
+
+            cameraRight.createCaptureSession(surfacesRight, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    captureSessionRight = session
+                    try {
+                        session.setRepeatingRequest(builderRight.build(), null, backgroundHandler)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start right camera preview", e)
+                    }
+                }
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e(TAG, "Failed to configure right camera session")
+                }
+            }, backgroundHandler)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start dual preview", e)
+        }
+    }
+
+    private var pendingLeftImage: android.media.Image? = null
+    private var pendingRightImage: android.media.Image? = null
+    private val spatialImageLock = Object()
+
+    private fun handleSpatialImage(image: android.media.Image, isLeft: Boolean) {
+        synchronized(spatialImageLock) {
+            if (isLeft) {
+                pendingLeftImage?.close()
+                pendingLeftImage = image
+            } else {
+                pendingRightImage?.close()
+                pendingRightImage = image
+            }
+
+            if (pendingLeftImage != null && pendingRightImage != null) {
+                val left = pendingLeftImage!!
+                val right = pendingRightImage!!
+                pendingLeftImage = null
+                pendingRightImage = null
+                
+                // Process images on a background thread to avoid blocking the ImageReader
+                backgroundHandler?.post {
+                    processAndSaveSpatialImage(left, right)
+                }
+            }
+        }
+    }
+
+    private fun processAndSaveSpatialImage(leftImage: android.media.Image, rightImage: android.media.Image) {
+        try {
+            val leftBitmap = imageToBitmap(leftImage)
+            val rightBitmap = imageToBitmap(rightImage)
+            
+            leftImage.close()
+            rightImage.close()
+
+            if (leftBitmap == null || rightBitmap == null) {
+                Log.e(TAG, "Failed to convert images to bitmaps")
+                return
+            }
+
+            // Create SBS Bitmap
+            val sbsWidth = leftBitmap.width + rightBitmap.width
+            val sbsHeight = Math.max(leftBitmap.height, rightBitmap.height)
+            val sbsBitmap = android.graphics.Bitmap.createBitmap(sbsWidth, sbsHeight, android.graphics.Bitmap.Config.ARGB_8888)
+            
+            val canvas = android.graphics.Canvas(sbsBitmap)
+            canvas.drawBitmap(leftBitmap, 0f, 0f, null)
+            canvas.drawBitmap(rightBitmap, leftBitmap.width.toFloat(), 0f, null)
+
+            leftBitmap.recycle()
+            rightBitmap.recycle()
+
+            // Save to MediaStore
+            val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + "_3D_LR"
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HorizonFPV")
+                }
+            }
+
+            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            uri?.let {
+                context.contentResolver.openOutputStream(it)?.use { out ->
+                    sbsBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
+                }
+                Handler(context.mainLooper).post {
+                    Toast.makeText(context, "Spatial Photo saved", Toast.LENGTH_SHORT).show()
+                }
+            }
+            sbsBitmap.recycle()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing spatial image", e)
+            leftImage.close()
+            rightImage.close()
+        }
+    }
+
+    private fun imageToBitmap(image: android.media.Image): android.graphics.Bitmap? {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     }
 
     private fun startPreview() {
@@ -708,6 +938,11 @@ class Camera2Controller(private val context: Context) {
     }
 
     fun takePicture() {
+        if (currentMode == CameraMode.SPATIAL) {
+            takeSpatialPicture()
+            return
+        }
+        
         val camera = cameraDevice ?: return
         val session = captureSession ?: return
         val reader = imageReader ?: return
@@ -718,6 +953,27 @@ class Camera2Controller(private val context: Context) {
             session.capture(builder.build(), null, backgroundHandler)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to take picture", e)
+        }
+    }
+
+    private fun takeSpatialPicture() {
+        val cameraLeft = cameraDeviceLeft ?: return
+        val cameraRight = cameraDeviceRight ?: return
+        val sessionLeft = captureSessionLeft ?: return
+        val sessionRight = captureSessionRight ?: return
+        val readerLeft = imageReaderLeft ?: return
+        val readerRight = imageReaderRight ?: return
+
+        try {
+            val builderLeft = cameraLeft.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            builderLeft.addTarget(readerLeft.surface)
+            sessionLeft.capture(builderLeft.build(), null, backgroundHandler)
+
+            val builderRight = cameraRight.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            builderRight.addTarget(readerRight.surface)
+            sessionRight.capture(builderRight.build(), null, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to take spatial picture", e)
         }
     }
 
@@ -846,6 +1102,22 @@ class Camera2Controller(private val context: Context) {
             cameraDevice = null
             imageReader?.close()
             imageReader = null
+            
+            // Close dual cameras
+            captureSessionLeft?.close()
+            captureSessionLeft = null
+            cameraDeviceLeft?.close()
+            cameraDeviceLeft = null
+            imageReaderLeft?.close()
+            imageReaderLeft = null
+            
+            captureSessionRight?.close()
+            captureSessionRight = null
+            cameraDeviceRight?.close()
+            cameraDeviceRight = null
+            imageReaderRight?.close()
+            imageReaderRight = null
+            
             mediaRecorder?.release()
             mediaRecorder = null
             stopBackgroundThread()
