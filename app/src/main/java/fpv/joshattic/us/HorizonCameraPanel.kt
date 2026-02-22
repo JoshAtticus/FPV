@@ -107,12 +107,39 @@ fun HorizonCameraPanel() {
 
     // --- State ---
     val settings = remember { AppSettings(context) }
+    
+    val allowedModes = remember {
+        val model = Build.MODEL
+        if (model.contains("Quest 3")) {
+            CameraMode.entries
+        } else if (model.contains("Quest")) {
+            listOf(CameraMode.AVATAR)
+        } else {
+            emptyList()
+        }
+    }
+
+    LaunchedEffect(allowedModes) {
+        if (allowedModes.isEmpty()) {
+            Toast.makeText(context, "Device not supported", Toast.LENGTH_LONG).show()
+            val intent = android.content.Intent(android.content.Intent.ACTION_DELETE).apply {
+                data = android.net.Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+            (context as? android.app.Activity)?.finish()
+        }
+    }
+
+    if (allowedModes.isEmpty()) {
+        return
+    }
+
     var selectedMode by remember { 
         mutableStateOf(
-            if (settings.rememberMode) {
-                try { CameraMode.valueOf(settings.lastMode) } catch (e: Exception) { CameraMode.PHOTO }
+            if (settings.rememberMode && allowedModes.contains(try { CameraMode.valueOf(settings.lastMode) } catch (e: Exception) { CameraMode.PHOTO })) {
+                try { CameraMode.valueOf(settings.lastMode) } catch (e: Exception) { allowedModes.first() }
             } else {
-                CameraMode.PHOTO
+                allowedModes.first()
             }
         ) 
     }
@@ -247,7 +274,7 @@ fun HorizonCameraPanel() {
         ) {
             Spacer(modifier = Modifier.height(24.dp))
             
-            CameraMode.entries.forEach { mode ->
+            allowedModes.forEach { mode ->
                 NavigationRailItem(
                     selected = (selectedMode == mode),
                     onClick = {
