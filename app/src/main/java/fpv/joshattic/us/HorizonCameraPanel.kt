@@ -984,14 +984,15 @@ class Camera2Controller(private val context: Context) {
                 setAudioEncodingBitRate(256000)
                 setAudioSamplingRate(48000)
                 setAudioChannels(2)
+                setVideoFrameRate(30)
             } else {
                 setVideoEncodingBitRate(settings.videoBitrate * 1000000)
                 setAudioEncodingBitRate(settings.audioBitrate)
                 setAudioSamplingRate(settings.audioSampleRate)
                 setAudioChannels(settings.audioChannels)
+                setVideoFrameRate(settings.videoFps)
             }
             
-            setVideoFrameRate(30)
             setVideoSize(resolution.width, resolution.height)
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -1084,6 +1085,7 @@ class Camera2Controller(private val context: Context) {
             sbsWidth,
             sbsHeight,
             settings.videoBitrate * 1000000,
+            settings.videoFps,
             nextVideoAbsolutePath!!
         )
 

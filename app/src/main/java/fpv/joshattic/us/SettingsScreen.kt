@@ -168,6 +168,7 @@ fun VideoSettingsTab(settings: AppSettings, availableResolutions: List<Size>, on
     var aspectRatio by remember { mutableStateOf(settings.videoAspectRatio) }
     var resolutionIndex by remember { mutableStateOf(settings.videoResolutionIndex) }
     var bitrate by remember { mutableStateOf(settings.videoBitrate) }
+    var fps by remember { mutableStateOf(settings.videoFps) }
     var audioChannels by remember { mutableStateOf(settings.audioChannels) }
     var audioSampleRate by remember { mutableStateOf(settings.audioSampleRate) }
     var audioBitrate by remember { mutableStateOf(settings.audioBitrate) }
@@ -238,6 +239,19 @@ fun VideoSettingsTab(settings: AppSettings, availableResolutions: List<Size>, on
             } else {
                 Text("No resolutions available for this aspect ratio.", color = Color.Gray)
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text("Framerate", color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
+            SegmentedControl(
+                options = listOf(30 to "30 FPS", 60 to "60 FPS"),
+                selectedOption = fps,
+                onOptionSelected = {
+                    fps = it
+                    settings.videoFps = it
+                    onSettingsChanged()
+                }
+            )
 
             Spacer(modifier = Modifier.height(24.dp))
 

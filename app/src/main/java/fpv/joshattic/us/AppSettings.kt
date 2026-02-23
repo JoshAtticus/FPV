@@ -17,6 +17,10 @@ class AppSettings(context: Context) {
         get() = prefs.getInt("video_bitrate", 14)
         set(value) = prefs.edit().putInt("video_bitrate", value).apply()
 
+    var videoFps: Int
+        get() = prefs.getInt("video_fps", 30)
+        set(value) = prefs.edit().putInt("video_fps", value).apply()
+
     var audioChannels: Int
         get() = prefs.getInt("audio_channels", 2)
         set(value) = prefs.edit().putInt("audio_channels", value).apply()

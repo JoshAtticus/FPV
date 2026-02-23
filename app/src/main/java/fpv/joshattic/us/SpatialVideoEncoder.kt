@@ -30,6 +30,7 @@ class SpatialVideoEncoder(
     private val width: Int,
     private val height: Int,
     private val videoBitrate: Int,
+    private val videoFps: Int,
     private val outputFile: String
 ) {
     private val TAG = "SpatialVideoEncoder"
@@ -153,7 +154,7 @@ class SpatialVideoEncoder(
                 setAudioSamplingRate(48000)
                 setAudioChannels(2)
                 
-                setVideoFrameRate(30)
+                setVideoFrameRate(videoFps)
                 setVideoSize(width, height)
                 setVideoEncoder(MediaRecorder.VideoEncoder.H264)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
