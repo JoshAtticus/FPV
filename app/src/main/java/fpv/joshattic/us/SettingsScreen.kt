@@ -390,6 +390,7 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
     val context = LocalContext.current
     var defaultCamera by remember { mutableStateOf(settings.defaultCamera) }
     var rememberMode by remember { mutableStateOf(settings.rememberMode) }
+    var showDebugDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
         SettingCard("General") {
@@ -445,6 +446,14 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Button(
+                    onClick = { showDebugDialog = true },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceLight, contentColor = Color.White)
+                ) {
+                    Text("View Info")
+                }
+
+                Button(
                     onClick = {
                         val info = generateDebugInfo(context)
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -476,6 +485,36 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
                 }
             }
         }
+    }
+
+    if (showDebugDialog) {
+        AlertDialog(
+            onDismissRequest = { showDebugDialog = false },
+            title = { Text("Device & Camera Info", color = Color.White) },
+            text = {
+                val info = remember { generateDebugInfo(context) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                        .background(SurfaceDark, RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = info,
+                        color = Color.LightGray,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.verticalScroll(rememberScrollState())
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDebugDialog = false }) {
+                    Text("Close", color = PrimaryGreen)
+                }
+            },
+            containerColor = SurfaceLight
+        )
     }
 }
 
