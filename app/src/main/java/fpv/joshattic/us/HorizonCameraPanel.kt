@@ -147,6 +147,7 @@ fun HorizonCameraPanel() {
     }
     var currentCameraId by remember { mutableStateOf(if (selectedMode == CameraMode.AVATAR) "1" else settings.defaultCamera) } 
     var isRecording by remember { mutableStateOf(false) }
+    var isSpatialVideo by remember { mutableStateOf(false) }
 
     // Settings logic
     var showSettings by remember { mutableStateOf(false) }
@@ -299,11 +300,11 @@ fun HorizonCameraPanel() {
                         Icon(
                             mode.icon, 
                             contentDescription = mode.label,
-                            tint = if (selectedMode == mode) Color.Yellow else Color.White
+                            tint = if (selectedMode == mode) Color(0xFFA5D6A7) else Color.White
                         ) 
                     },
                     colors = NavigationRailItemDefaults.colors(
-                        selectedIconColor = Color.Yellow,
+                        selectedIconColor = Color(0xFFA5D6A7),
                         unselectedIconColor = Color.White,
                         indicatorColor = Color.Transparent
                     )
@@ -375,7 +376,7 @@ fun HorizonCameraPanel() {
                         val isSelected = currentCameraId == id
                         Text(
                             text = if (id == "50") "L" else "R",
-                            color = if (isSelected) Color.Yellow else Color.White,
+                            color = if (isSelected) Color(0xFFA5D6A7) else Color.White,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clickable { 
@@ -413,8 +414,15 @@ fun HorizonCameraPanel() {
                 }
                 
                 Column {
+                    val modeText = when {
+                        selectedMode == CameraMode.VIDEO -> "Video Mode"
+                        selectedMode == CameraMode.SPATIAL && isSpatialVideo -> "Spatial Video"
+                        selectedMode == CameraMode.SPATIAL && !isSpatialVideo -> "Spatial Photo"
+                        selectedMode == CameraMode.AVATAR -> "Avatar Mode"
+                        else -> "Photo Mode"
+                    }
                     Text(
-                        text = if (selectedMode == CameraMode.VIDEO) "Video Mode" else "Photo Mode",
+                        text = modeText,
                         color = Color.White,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -424,6 +432,43 @@ fun HorizonCameraPanel() {
                             color = Color.Gray,
                             style = MaterialTheme.typography.labelSmall
                         )
+                    }
+                }
+            }
+
+            // Bottom Center: Spatial Photo/Video Toggle
+            if (selectedMode == CameraMode.SPATIAL) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp)
+                        .background(Color(0xFF333333), RoundedCornerShape(50)),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val photoBg = if (!isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
+                    val videoBg = if (isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
+                    val photoIconTint = if (!isSpatialVideo) Color(0xFF1C1C1E) else Color.White
+                    val videoIconTint = if (isSpatialVideo) Color(0xFF1C1C1E) else Color.White
+
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp, 48.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(photoBg)
+                            .clickable { if (!isRecording) isSpatialVideo = false },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = "Spatial Photo", tint = photoIconTint)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp, 48.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(videoBg)
+                            .clickable { if (!isRecording) isSpatialVideo = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Videocam, contentDescription = "Spatial Video", tint = videoIconTint)
                     }
                 }
             }
@@ -440,9 +485,25 @@ fun HorizonCameraPanel() {
                     onClick = {
                         performHaptic()
                         when (selectedMode) {
-                            CameraMode.PHOTO, CameraMode.AVATAR, CameraMode.SPATIAL -> {
+                            CameraMode.PHOTO, CameraMode.AVATAR -> {
                                 sound.play(MediaActionSound.SHUTTER_CLICK)
                                 cameraController.takePicture()
+                            }
+                            CameraMode.SPATIAL -> {
+                                if (isSpatialVideo) {
+                                    if (isRecording) {
+                                        sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+                                        cameraController.stopSpatialRecording()
+                                        isRecording = false
+                                    } else {
+                                        sound.play(MediaActionSound.START_VIDEO_RECORDING)
+                                        cameraController.startSpatialRecording()
+                                        isRecording = true
+                                    }
+                                } else {
+                                    sound.play(MediaActionSound.SHUTTER_CLICK)
+                                    cameraController.takePicture()
+                                }
                             }
                             CameraMode.VIDEO -> {
                                 if (isRecording) {
@@ -527,6 +588,7 @@ class Camera2Controller(private val context: Context) {
     private var imageReaderRight: ImageReader? = null
     
     private var mediaRecorder: MediaRecorder? = null
+    private var spatialVideoEncoder: SpatialVideoEncoder? = null
     
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -1002,6 +1064,114 @@ class Camera2Controller(private val context: Context) {
         }
     }
 
+    fun startSpatialRecording() {
+        val cameraLeft = cameraDeviceLeft ?: return
+        val cameraRight = cameraDeviceRight ?: return
+        val resolution = currentResolution ?: return
+        val texture = textureView?.surfaceTexture ?: return
+
+        val settings = AppSettings(context)
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + "_3D_LR"
+        val tempFile = java.io.File(context.cacheDir, "$name.mp4")
+        nextVideoAbsolutePath = tempFile.absolutePath
+
+        // The final video width is 2x the resolution width
+        val sbsWidth = resolution.width * 2
+        val sbsHeight = resolution.height
+
+        spatialVideoEncoder = SpatialVideoEncoder(
+            context,
+            sbsWidth,
+            sbsHeight,
+            settings.videoBitrate * 1000000,
+            nextVideoAbsolutePath!!
+        )
+
+        spatialVideoEncoder?.prepare {
+            backgroundHandler?.post {
+                try {
+                    // Setup Left Camera
+                    val builderLeft = cameraLeft.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                    val surfacesLeft = mutableListOf<Surface>()
+                    
+                    texture.setDefaultBufferSize(resolution.width, resolution.height)
+                    val previewSurface = Surface(texture)
+                    surfacesLeft.add(previewSurface)
+                    builderLeft.addTarget(previewSurface)
+
+                    val leftEncoderSurface = spatialVideoEncoder!!.leftSurface!!
+                    surfacesLeft.add(leftEncoderSurface)
+                    builderLeft.addTarget(leftEncoderSurface)
+
+                    cameraLeft.createCaptureSession(surfacesLeft, object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            captureSessionLeft = session
+                            try {
+                                session.setRepeatingRequest(builderLeft.build(), null, backgroundHandler)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to start left camera recording", e)
+                            }
+                        }
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            Log.e(TAG, "Failed to configure left camera recording session")
+                        }
+                    }, backgroundHandler)
+
+                    // Setup Right Camera
+                    val builderRight = cameraRight.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                    val surfacesRight = mutableListOf<Surface>()
+
+                    val rightEncoderSurface = spatialVideoEncoder!!.rightSurface!!
+                    surfacesRight.add(rightEncoderSurface)
+                    builderRight.addTarget(rightEncoderSurface)
+
+                    cameraRight.createCaptureSession(surfacesRight, object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            captureSessionRight = session
+                            try {
+                                session.setRepeatingRequest(builderRight.build(), null, backgroundHandler)
+                                spatialVideoEncoder?.start()
+                                isRecordingVideo = true
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to start right camera recording", e)
+                            }
+                        }
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            Log.e(TAG, "Failed to configure right camera recording session")
+                        }
+                    }, backgroundHandler)
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start spatial recording", e)
+                }
+            }
+        }
+    }
+
+    fun stopSpatialRecording() {
+        if (!isRecordingVideo) return
+        isRecordingVideo = false
+        try {
+            captureSessionLeft?.stopRepeating()
+            captureSessionLeft?.abortCaptures()
+            captureSessionRight?.stopRepeating()
+            captureSessionRight?.abortCaptures()
+            
+            val videoPathToSave = nextVideoAbsolutePath
+            nextVideoAbsolutePath = null
+            
+            spatialVideoEncoder?.stop {
+                saveVideoToMediaStore(videoPathToSave)
+                // Restart preview
+                startDualPreview()
+            }
+            spatialVideoEncoder = null
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to stop spatial recording", e)
+        }
+    }
+
     fun startRecording() {
         if (cameraDevice == null || !textureView!!.isAvailable || currentResolution == null) return
         
@@ -1117,6 +1287,9 @@ class Camera2Controller(private val context: Context) {
             cameraDeviceRight = null
             imageReaderRight?.close()
             imageReaderRight = null
+            
+            spatialVideoEncoder?.stop {}
+            spatialVideoEncoder = null
             
             mediaRecorder?.release()
             mediaRecorder = null

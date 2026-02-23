@@ -1,6 +1,16 @@
 package fpv.joshattic.us
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.MediaRecorder
+import android.os.Build
 import android.util.Size
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -377,6 +387,7 @@ fun PhotoSettingsTab(settings: AppSettings, availableResolutions: List<Size>, on
 
 @Composable
 fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
+    val context = LocalContext.current
     var defaultCamera by remember { mutableStateOf(settings.defaultCamera) }
     var rememberMode by remember { mutableStateOf(settings.rememberMode) }
 
@@ -418,7 +429,102 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        SettingCard("Debug") {
+            Text(
+                "Copy or share detailed device and camera information for troubleshooting.",
+                color = Color.Gray,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Button(
+                    onClick = {
+                        val info = generateDebugInfo(context)
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("Device Info", info)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceLight, contentColor = Color.White)
+                ) {
+                    Text("Copy Info")
+                }
+
+                Button(
+                    onClick = {
+                        val info = generateDebugInfo(context)
+                        val sendIntent = Intent().apply {
+                            action = Intent.ACTION_SEND
+                            putExtra(Intent.EXTRA_TEXT, info)
+                            type = "text/plain"
+                        }
+                        val shareIntent = Intent.createChooser(sendIntent, null)
+                        context.startActivity(shareIntent)
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryGreen, contentColor = Color.Black)
+                ) {
+                    Text("Share Info")
+                }
+            }
+        }
     }
+}
+
+fun generateDebugInfo(context: Context): String {
+    val sb = StringBuilder()
+    sb.append("--- Device Info ---\n")
+    sb.append("Model: ${Build.MODEL}\n")
+    sb.append("Manufacturer: ${Build.MANUFACTURER}\n")
+    sb.append("Device: ${Build.DEVICE}\n")
+    sb.append("Android Version: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})\n")
+    
+    val metrics = context.resources.displayMetrics
+    sb.append("Screen Resolution: ${metrics.widthPixels}x${metrics.heightPixels}\n")
+    sb.append("Density: ${metrics.densityDpi}dpi\n\n")
+
+    sb.append("--- Camera Info ---\n")
+    val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    try {
+        for (cameraId in cameraManager.cameraIdList) {
+            sb.append("Camera ID: $cameraId\n")
+            val chars = cameraManager.getCameraCharacteristics(cameraId)
+            
+            val facing = chars.get(CameraCharacteristics.LENS_FACING)
+            val facingStr = when (facing) {
+                CameraCharacteristics.LENS_FACING_FRONT -> "Front"
+                CameraCharacteristics.LENS_FACING_BACK -> "Back"
+                CameraCharacteristics.LENS_FACING_EXTERNAL -> "External"
+                else -> "Unknown"
+            }
+            sb.append("  Facing: $facingStr\n")
+            
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            if (map != null) {
+                val videoSizes = map.getOutputSizes(MediaRecorder::class.java)
+                sb.append("  Video Resolutions: ${videoSizes?.joinToString { "${it.width}x${it.height}" } ?: "None"}\n")
+                
+                val photoSizes = map.getOutputSizes(ImageFormat.JPEG)
+                sb.append("  Photo Resolutions: ${photoSizes?.joinToString { "${it.width}x${it.height}" } ?: "None"}\n")
+            }
+            
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            sb.append("  FPS Ranges: ${fpsRanges?.joinToString { "[${it.lower}-${it.upper}]" } ?: "None"}\n")
+            sb.append("\n")
+        }
+    } catch (e: Exception) {
+        sb.append("Error fetching camera info: ${e.message}\n")
+    }
+    
+    return sb.toString()
 }
 
 fun filterResolutionsByAspectRatio(resolutions: List<Size>, aspectRatio: String): List<Size> {
