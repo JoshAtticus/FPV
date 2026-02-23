@@ -148,6 +148,7 @@ fun HorizonCameraPanel() {
     var currentCameraId by remember { mutableStateOf(if (selectedMode == CameraMode.AVATAR) "1" else settings.defaultCamera) } 
     var isRecording by remember { mutableStateOf(false) }
     var isSpatialVideo by remember { mutableStateOf(false) }
+    var showSpatialWarning by remember { mutableStateOf(selectedMode == CameraMode.SPATIAL && !settings.hasSeenSpatialWarning) }
 
     // Settings logic
     var showSettings by remember { mutableStateOf(false) }
@@ -239,6 +240,10 @@ fun HorizonCameraPanel() {
             if (currentCameraId == "1") {
                 currentCameraId = settings.defaultCamera
             }
+        }
+        
+        if (selectedMode == CameraMode.SPATIAL && !settings.hasSeenSpatialWarning) {
+            showSpatialWarning = true
         }
     }
 
@@ -359,6 +364,44 @@ fun HorizonCameraPanel() {
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
+                }
+            }
+
+            // Top Center: Spatial Warning Banner
+            if (showSpatialWarning && selectedMode == CameraMode.SPATIAL && !isRecording) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 24.dp)
+                        .background(Color(0xCC000000), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = Color(0xFFFFD54F),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = "Keep subjects at least 3 feet/0.9 meters away for best results.",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    IconButton(
+                        onClick = {
+                            showSpatialWarning = false
+                            settings.hasSeenSpatialWarning = true
+                        },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            tint = Color.White
+                        )
+                    }
                 }
             }
 

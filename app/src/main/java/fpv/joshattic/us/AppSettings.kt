@@ -52,4 +52,8 @@ class AppSettings(context: Context) {
     var lastMode: String
         get() = prefs.getString("last_mode", CameraMode.PHOTO.name) ?: CameraMode.PHOTO.name
         set(value) = prefs.edit().putString("last_mode", value).apply()
+
+    var hasSeenSpatialWarning: Boolean
+        get() = prefs.getBoolean("has_seen_spatial_warning", false)
+        set(value) = prefs.edit().putBoolean("has_seen_spatial_warning", value).apply()
 }
