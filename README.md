@@ -6,7 +6,7 @@ FPV is a camera app for the Quest 3 (and possibly the Quest 3s, but this is unte
 
 ## Features
 - Photo & Video Capture
-- Spatial Photo Capture
+- Spatial Photo & Video Capture (first of its kind on Quest!)
 - Avatar Capture
 - Lens Selector
 - Settings page for resolution, bitrate, audio quality, app settings etc
