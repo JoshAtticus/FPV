@@ -24,6 +24,8 @@ import android.view.TextureView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -70,7 +72,6 @@ fun HorizonCameraPanel() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     
-    // --- Permissions Handling ---
     val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
     if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
         permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -107,7 +108,6 @@ fun HorizonCameraPanel() {
         return
     }
 
-    // --- State ---
     val settings = remember { AppSettings(context) }
     
     val allowedModes = remember {
@@ -150,14 +150,16 @@ fun HorizonCameraPanel() {
     var isSpatialVideo by remember { mutableStateOf(false) }
     var showSpatialWarning by remember { mutableStateOf(selectedMode == CameraMode.SPATIAL && !settings.hasSeenSpatialWarning) }
 
-    // Settings logic
     var showSettings by remember { mutableStateOf(false) }
     var selectedResolution by remember { mutableStateOf<Size?>(null) }
     var availableVideoResolutions by remember { mutableStateOf(emptyList<Size>()) }
     var availablePhotoResolutions by remember { mutableStateOf(emptyList<Size>()) }
     var recordingDurationMillis by remember { mutableLongStateOf(0L) }
+    
+    var timerDelay by remember { mutableStateOf(0) }
+    var isTimerRunning by remember { mutableStateOf(false) }
+    var timerCountdownSeconds by remember { mutableStateOf(0) }
 
-    // Helpers
     val sound = remember { MediaActionSound() }
     val vibrator = context.getSystemService(Vibrator::class.java)
     val performHaptic = remember {
@@ -180,7 +182,6 @@ fun HorizonCameraPanel() {
         }
     }
 
-    // Timer logic
     LaunchedEffect(isRecording) {
         if (isRecording) {
             val startTime = System.currentTimeMillis()
@@ -193,7 +194,6 @@ fun HorizonCameraPanel() {
         }
     }
 
-    // Fetch Resolutions using Camera2
     LaunchedEffect(currentCameraId, selectedMode, showSettings) {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
@@ -211,7 +211,6 @@ fun HorizonCameraPanel() {
                 if (selectedMode == CameraMode.AVATAR) {
                     selectedResolution = sortedSizes.firstOrNull()
                 } else if (selectedMode == CameraMode.SPATIAL) {
-                    // Force 16:9 max resolution for Spatial mode
                     val filtered = filterResolutionsByAspectRatio(sortedSizes, "16:9")
                     selectedResolution = filtered.firstOrNull() ?: sortedSizes.firstOrNull()
                 } else {
@@ -231,7 +230,6 @@ fun HorizonCameraPanel() {
         }
     }
 
-    // Lens ID Logic
     LaunchedEffect(selectedMode) {
         settings.lastMode = selectedMode.name
         if (selectedMode == CameraMode.AVATAR) {
@@ -247,7 +245,6 @@ fun HorizonCameraPanel() {
         }
     }
 
-    // Camera Controller
     val cameraController = remember { Camera2Controller(context) }
     
     DisposableEffect(lifecycleOwner) {
@@ -269,264 +266,81 @@ fun HorizonCameraPanel() {
 
     LaunchedEffect(currentCameraId, selectedResolution, selectedMode) {
         if (selectedResolution != null) {
+            // Slight delay to allow UI animation to finish before heavy camera operation
+            delay(50) 
             cameraController.openCamera(currentCameraId, selectedResolution!!, selectedMode)
         }
     }
 
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // --- Navigation Rail ---
-        NavigationRail(
-            modifier = Modifier.width(96.dp),
-            containerColor = Color(0xFF1C1C1E),
-            contentColor = Color.White
+        AndroidView(
+            modifier = Modifier
+                .fillMaxSize(),
+            factory = { ctx ->
+                TextureView(ctx).apply {
+                    surfaceTextureListener = cameraController.surfaceTextureListener
+                    cameraController.textureView = this
+                }
+            }
+        )
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(24.dp))
-            
-            allowedModes.forEach { mode ->
-                NavigationRailItem(
-                    selected = (selectedMode == mode),
-                    onClick = {
-                        if (!isRecording) {
-                            selectedMode = mode
-                        } 
-                    },
-                    label = { 
-                        Text(
-                            mode.label, 
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (selectedMode == mode) FontWeight.Bold else FontWeight.Normal
-                        ) 
-                    },
-                    icon = { 
+            if (!isRecording) {
+                Column(
+                    modifier = Modifier
+                        .background(Color(0x80000000), RoundedCornerShape(16.dp))
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    allowedModes.forEach { mode ->
+                        val isSelected = selectedMode == mode
+                        val scale by animateFloatAsState(if (isSelected) 1.2f else 1.0f)
+                        val alpha by animateFloatAsState(if (isSelected) 1.0f else 0.5f)
+                        
                         Icon(
-                            mode.icon, 
+                            imageVector = mode.icon, 
                             contentDescription = mode.label,
-                            tint = if (selectedMode == mode) Color(0xFFA5D6A7) else Color.White
+                            tint = if (isSelected) Color(0xFFA5D6A7) else Color.White,
+                            modifier = Modifier
+                                .size(24.dp)
+                                .graphicsLayer(scaleX = scale, scaleY = scale, alpha = alpha)
+                                .clickable { 
+                                    selectedMode = mode
+                                    performHaptic()
+                                }
                         ) 
-                    },
-                    colors = NavigationRailItemDefaults.colors(
-                        selectedIconColor = Color(0xFFA5D6A7),
-                        unselectedIconColor = Color.White,
-                        indicatorColor = Color.Transparent
-                    )
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+                    }
+                }
             }
         }
-
-        // --- Main Camera Area ---
+        
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .weight(1f)
-                .clipToBounds() // Prevent camera preview from bleeding over the sidebar
+                .align(Alignment.CenterEnd)
+                .padding(end = 32.dp)
         ) {
-            // Camera Preview
-            AndroidView(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1f
-                        scaleY = 1f
-                    },
-                factory = { ctx ->
-                    TextureView(ctx).apply {
-                        surfaceTextureListener = cameraController.surfaceTextureListener
-                        cameraController.textureView = this
+            ShutterButton(
+                mode = selectedMode,
+                isRecording = isRecording,
+                onClick = {
+                    if (isTimerRunning) {
+                        isTimerRunning = false
+                        timerCountdownSeconds = 0
+                        return@ShutterButton
                     }
-                }
-            )
-
-            // Top Center: Recording Timer
-            if (isRecording) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 24.dp)
-                        .background(Color(0x80000000), RoundedCornerShape(16.dp))
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(12.dp)
-                            .background(Color.Red, CircleShape)
-                    )
-                    val seconds = (recordingDurationMillis / 1000) % 60
-                    val minutes = (recordingDurationMillis / 1000) / 60
-                    Text(
-                        text = String.format(Locale.US, "%02d:%02d", minutes, seconds),
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            // Top Center: Spatial Warning Banner
-            if (showSpatialWarning && selectedMode == CameraMode.SPATIAL && !isRecording) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 24.dp)
-                        .background(Color(0xCC000000), RoundedCornerShape(16.dp))
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = "Warning",
-                        tint = Color(0xFFFFD54F),
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Text(
-                        text = "Keep subjects at least 3 feet/0.9 meters away for best results.",
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    IconButton(
-                        onClick = {
-                            showSpatialWarning = false
-                            settings.hasSeenSpatialWarning = true
-                        },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Dismiss",
-                            tint = Color.White
-                        )
-                    }
-                }
-            }
-
-            // Top Right: Lens Switcher
-            if (selectedMode != CameraMode.AVATAR && selectedMode != CameraMode.SPATIAL) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .background(Color(0x80000000), RoundedCornerShape(20.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf("50", "51").forEach { id ->
-                        val isSelected = currentCameraId == id
-                        Text(
-                            text = if (id == "50") "L" else "R",
-                            color = if (isSelected) Color(0xFFA5D6A7) else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable { 
-                                    if (!isRecording) {
-                                        performHaptic()
-                                        currentCameraId = id 
-                                    }
-                                }
-                                .padding(8.dp)
-                        )
-                    }
-                }
-            }
-
-            // Bottom Left: Settings & Stats
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                IconButton(onClick = { 
-                    if (!isRecording) {
-                        performHaptic()
-                        showSettings = true 
-                    }
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-                
-                Column {
-                    val modeText = when {
-                        selectedMode == CameraMode.VIDEO -> "Video Mode"
-                        selectedMode == CameraMode.SPATIAL && isSpatialVideo -> "Spatial Video"
-                        selectedMode == CameraMode.SPATIAL && !isSpatialVideo -> "Spatial Photo"
-                        selectedMode == CameraMode.AVATAR -> "Avatar Mode"
-                        else -> "Photo Mode"
-                    }
-                    Text(
-                        text = modeText,
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    if (selectedResolution != null) {
-                        Text(
-                            text = "${selectedResolution!!.width}x${selectedResolution!!.height}", 
-                            color = Color.Gray,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-            }
-
-            // Bottom Center: Spatial Photo/Video Toggle
-            if (selectedMode == CameraMode.SPATIAL) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 32.dp)
-                        .background(Color(0xFF333333), RoundedCornerShape(50)),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val photoBg = if (!isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
-                    val videoBg = if (isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
-                    val photoIconTint = if (!isSpatialVideo) Color(0xFF1C1C1E) else Color.White
-                    val videoIconTint = if (isSpatialVideo) Color(0xFF1C1C1E) else Color.White
-
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp, 48.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(photoBg)
-                            .clickable { if (!isRecording) isSpatialVideo = false },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Default.PhotoCamera, contentDescription = "Spatial Photo", tint = photoIconTint)
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp, 48.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(videoBg)
-                            .clickable { if (!isRecording) isSpatialVideo = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Default.Videocam, contentDescription = "Spatial Video", tint = videoIconTint)
-                    }
-                }
-            }
-
-            // Right Center: Shutter Button
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 32.dp)
-            ) {
-                ShutterButton(
-                    mode = selectedMode,
-                    isRecording = isRecording,
-                    onClick = {
-                        performHaptic()
+                    performHaptic()
+                    val takeAction = {
                         when (selectedMode) {
                             CameraMode.PHOTO, CameraMode.AVATAR -> {
                                 sound.play(MediaActionSound.SHUTTER_CLICK)
@@ -561,18 +375,306 @@ fun HorizonCameraPanel() {
                             }
                         }
                     }
+
+                    if (timerDelay > 0 && !isRecording) {
+                         isTimerRunning = true
+                         timerCountdownSeconds = timerDelay
+                         
+                         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                             while (timerCountdownSeconds > 0 && isTimerRunning) {
+                                 delay(1000)
+                                 timerCountdownSeconds--
+                             }
+                             if (isTimerRunning) {
+                                 isTimerRunning = false
+                                 takeAction()
+                             }
+                         }
+                    } else {
+                        takeAction()
+                    }
+                }
+            )
+        }
+
+        if (isTimerRunning) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.3f))
+                    .clickable(enabled = false) {},
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "$timerCountdownSeconds",
+                    color = Color.White,
+                    style = MaterialTheme.typography.displayLarge,
+                    fontWeight = FontWeight.Bold
                 )
+            }
+        }
+
+        if (isRecording) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 24.dp)
+                    .background(Color(0x80000000), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .background(Color.Red, CircleShape)
+                )
+                val seconds = (recordingDurationMillis / 1000) % 60
+                val minutes = (recordingDurationMillis / 1000) / 60
+                Text(
+                    text = String.format(Locale.US, "%02d:%02d", minutes, seconds),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        if (showSpatialWarning && selectedMode == CameraMode.SPATIAL && !isRecording) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 24.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD54F),
+                    modifier = Modifier.size(24.dp)
+                )
+                Text(
+                    text = "Keep subjects at least 3 feet/0.9 meters away for best results.",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                IconButton(
+                    onClick = {
+                        showSpatialWarning = false
+                        settings.hasSeenSpatialWarning = true
+                    },
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = null,
+                        tint = Color.White
+                    )
+                }
+            }
+        }
+
+        if (selectedMode != CameraMode.AVATAR && selectedMode != CameraMode.SPATIAL) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .background(Color(0x80000000), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                 Icon(
+                    imageVector = Icons.Default.Timer,
+                    contentDescription = "Timer",
+                    tint = if (timerDelay > 0) Color(0xFFA5D6A7) else Color.White,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable {
+                            timerDelay = when(timerDelay) {
+                                0 -> 1
+                                1 -> 2
+                                2 -> 5
+                                else -> 0
+                            }
+                            performHaptic()
+                        }
+                )
+                Text(
+                    text = if (timerDelay == 0) "OFF" else "${timerDelay}s",
+                    color = if (timerDelay > 0) Color(0xFFA5D6A7) else Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable {
+                            timerDelay = when(timerDelay) {
+                                0 -> 1
+                                1 -> 2
+                                2 -> 5
+                                else -> 0
+                            }
+                            performHaptic()
+                        }
+                )
+
+                Spacer(modifier = Modifier.width(1.dp).height(16.dp).background(Color.Gray))
+
+                listOf("50", "51").forEach { id ->
+                    val isSelected = currentCameraId == id
+                    Text(
+                        text = if (id == "50") "L" else "R",
+                        color = if (isSelected) Color(0xFFA5D6A7) else Color.White,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { 
+                                if (!isRecording) {
+                                    performHaptic()
+                                    currentCameraId = id 
+                                }
+                            }
+                            .padding(8.dp)
+                    )
+                }
+            }
+        } else if (selectedMode == CameraMode.SPATIAL) {
+             Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .background(Color(0x80000000), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                 verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Timer,
+                    contentDescription = "Timer",
+                    tint = if (timerDelay > 0) Color(0xFFA5D6A7) else Color.White,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable {
+                            timerDelay = when(timerDelay) {
+                                0 -> 1
+                                1 -> 2
+                                2 -> 5
+                                else -> 0
+                            }
+                            performHaptic()
+                        }
+                        .padding(end = 4.dp)
+                )
+                Text(
+                    text = if (timerDelay == 0) "OFF" else "${timerDelay}s",
+                    color = if (timerDelay > 0) Color(0xFFA5D6A7) else Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable {
+                            timerDelay = when(timerDelay) {
+                                0 -> 1
+                                1 -> 2
+                                2 -> 5
+                                else -> 0
+                            }
+                            performHaptic()
+                        }
+                        .padding(start = 4.dp)
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            IconButton(onClick = { 
+                if (!isRecording) {
+                    performHaptic()
+                    showSettings = true 
+                }
+            }) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+            
+            if (settings.showModeText) {
+                Column {
+                    val modeText = when {
+                        selectedMode == CameraMode.VIDEO -> "Video Mode"
+                        selectedMode == CameraMode.SPATIAL && isSpatialVideo -> "Spatial Video"
+                        selectedMode == CameraMode.SPATIAL && !isSpatialVideo -> "Spatial Photo"
+                        selectedMode == CameraMode.AVATAR -> "Avatar Mode"
+                        else -> "Photo Mode"
+                    }
+                    Text(
+                        text = modeText,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (selectedResolution != null) {
+                        Text(
+                            text = "${selectedResolution!!.width}x${selectedResolution!!.height}", 
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+
+        if (selectedMode == CameraMode.SPATIAL) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 32.dp)
+                    .background(Color(0xFF333333), RoundedCornerShape(50)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val photoBg = if (!isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
+                val videoBg = if (isSpatialVideo) Color(0xFFA5D6A7) else Color.Transparent
+                val photoIconTint = if (!isSpatialVideo) Color(0xFF1C1C1E) else Color.White
+                val videoIconTint = if (isSpatialVideo) Color(0xFF1C1C1E) else Color.White
+
+                Box(
+                    modifier = Modifier
+                        .size(64.dp, 48.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(photoBg)
+                        .clickable { if (!isRecording) isSpatialVideo = false },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = photoIconTint)
+                }
+                Box(
+                    modifier = Modifier
+                        .size(64.dp, 48.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(videoBg)
+                        .clickable { if (!isRecording) isSpatialVideo = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Videocam, contentDescription = null, tint = videoIconTint)
+                }
             }
         }
     }
 
-    if (showSettings) {
+    AnimatedVisibility(
+        visible = showSettings,
+        enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+        exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
+    ) {
         SettingsScreen(
             onDismiss = { showSettings = false },
             availableVideoResolutions = availableVideoResolutions,
             availablePhotoResolutions = availablePhotoResolutions,
             onSettingsChanged = {
-                // Trigger a re-evaluation of the selected resolution
                 val sortedSizes = if (selectedMode == CameraMode.VIDEO) availableVideoResolutions else availablePhotoResolutions
                 if (selectedMode != CameraMode.AVATAR) {
                     val aspectRatio = if (selectedMode == CameraMode.VIDEO) settings.videoAspectRatio else settings.photoAspectRatio
@@ -622,7 +724,6 @@ class Camera2Controller(private val context: Context) {
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
     
-    // Dual camera state for SPATIAL mode
     private var cameraDeviceLeft: CameraDevice? = null
     private var cameraDeviceRight: CameraDevice? = null
     private var captureSessionLeft: CameraCaptureSession? = null
@@ -684,7 +785,6 @@ class Camera2Controller(private val context: Context) {
 
         val matrix = android.graphics.Matrix()
         
-        // 1. Undo TextureView's implicit scaling to get a 1:1 mapping
         matrix.setScale(
             resolution.width.toFloat() / viewWidth.toFloat(),
             resolution.height.toFloat() / viewHeight.toFloat(),
@@ -692,12 +792,10 @@ class Camera2Controller(private val context: Context) {
             viewHeight / 2f
         )
 
-        // 2. Apply rotation
         if (rotationToApply != 0) {
             matrix.postRotate(rotationToApply.toFloat(), viewWidth / 2f, viewHeight / 2f)
         }
 
-        // 3. Scale to fill the view (CENTER_CROP)
         val scale = Math.max(
             viewWidth.toFloat() / rotatedWidth.toFloat(),
             viewHeight.toFloat() / rotatedHeight.toFloat()
@@ -809,7 +907,6 @@ class Camera2Controller(private val context: Context) {
         val surface = Surface(texture)
 
         try {
-            // Setup Left Camera
             val surfacesLeft = mutableListOf<Surface>(surface)
             val builderLeft = cameraLeft.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             builderLeft.addTarget(surface)
@@ -838,7 +935,6 @@ class Camera2Controller(private val context: Context) {
                 }
             }, backgroundHandler)
 
-            // Setup Right Camera (No preview surface, just ImageReader)
             val surfacesRight = mutableListOf<Surface>()
             val builderRight = cameraRight.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
 
@@ -892,7 +988,6 @@ class Camera2Controller(private val context: Context) {
                 pendingLeftImage = null
                 pendingRightImage = null
                 
-                // Process images on a background thread to avoid blocking the ImageReader
                 backgroundHandler?.post {
                     processAndSaveSpatialImage(left, right)
                 }
@@ -913,7 +1008,6 @@ class Camera2Controller(private val context: Context) {
                 return
             }
 
-            // Create SBS Bitmap
             val sbsWidth = leftBitmap.width + rightBitmap.width
             val sbsHeight = Math.max(leftBitmap.height, rightBitmap.height)
             val sbsBitmap = android.graphics.Bitmap.createBitmap(sbsWidth, sbsHeight, android.graphics.Bitmap.Config.ARGB_8888)
@@ -925,7 +1019,6 @@ class Camera2Controller(private val context: Context) {
             leftBitmap.recycle()
             rightBitmap.recycle()
 
-            // Save to MediaStore
             val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + "_3D_LR"
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1119,7 +1212,6 @@ class Camera2Controller(private val context: Context) {
         val tempFile = java.io.File(context.cacheDir, "$name.mp4")
         nextVideoAbsolutePath = tempFile.absolutePath
 
-        // The final video width is 2x the resolution width
         val sbsWidth = resolution.width * 2
         val sbsHeight = resolution.height
 
@@ -1135,7 +1227,6 @@ class Camera2Controller(private val context: Context) {
         spatialVideoEncoder?.prepare {
             backgroundHandler?.post {
                 try {
-                    // Setup Left Camera
                     val builderLeft = cameraLeft.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
                     val surfacesLeft = mutableListOf<Surface>()
                     
@@ -1162,7 +1253,6 @@ class Camera2Controller(private val context: Context) {
                         }
                     }, backgroundHandler)
 
-                    // Setup Right Camera
                     val builderRight = cameraRight.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
                     val surfacesRight = mutableListOf<Surface>()
 
@@ -1207,7 +1297,6 @@ class Camera2Controller(private val context: Context) {
             
             spatialVideoEncoder?.stop {
                 saveVideoToMediaStore(videoPathToSave)
-                // Restart preview
                 startDualPreview()
             }
             spatialVideoEncoder = null
@@ -1270,7 +1359,6 @@ class Camera2Controller(private val context: Context) {
             saveVideoToMediaStore(nextVideoAbsolutePath)
             nextVideoAbsolutePath = null
             
-            // Restart preview
             startPreview()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop recording", e)
@@ -1318,7 +1406,6 @@ class Camera2Controller(private val context: Context) {
             imageReader?.close()
             imageReader = null
             
-            // Close dual cameras
             captureSessionLeft?.close()
             captureSessionLeft = null
             cameraDeviceLeft?.close()

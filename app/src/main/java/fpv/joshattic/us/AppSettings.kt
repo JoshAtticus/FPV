@@ -56,4 +56,8 @@ class AppSettings(context: Context) {
     var hasSeenSpatialWarning: Boolean
         get() = prefs.getBoolean("has_seen_spatial_warning", false)
         set(value) = prefs.edit().putBoolean("has_seen_spatial_warning", value).apply()
+
+    var showModeText: Boolean
+        get() = prefs.getBoolean("show_mode_text", false)
+        set(value) = prefs.edit().putBoolean("show_mode_text", value).apply()
 }

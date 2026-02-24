@@ -88,7 +88,15 @@ fun SettingsScreen(
         AnimatedContent(
             targetState = selectedTab,
             transitionSpec = {
-                fadeIn(animationSpec = tween(300)) togetherWith fadeOut(animationSpec = tween(300))
+                if (targetState > initialState) {
+                    slideInHorizontally { width -> width } + fadeIn() togetherWith
+                            slideOutHorizontally { width -> -width } + fadeOut()
+                } else {
+                    slideInHorizontally { width -> -width } + fadeIn() togetherWith
+                            slideOutHorizontally { width -> width } + fadeOut()
+                }.using(
+                    SizeTransform(clip = false)
+                )
             },
             label = "TabTransition"
         ) { targetTab ->
@@ -404,6 +412,7 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
     val context = LocalContext.current
     var defaultCamera by remember { mutableStateOf(settings.defaultCamera) }
     var rememberMode by remember { mutableStateOf(settings.rememberMode) }
+    var showModeText by remember { mutableStateOf(settings.showModeText) }
     var showDebugDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
@@ -432,6 +441,31 @@ fun AppSettingsTab(settings: AppSettings, onSettingsChanged: () -> Unit) {
                     onCheckedChange = {
                         rememberMode = it
                         settings.rememberMode = it
+                        onSettingsChanged()
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White, 
+                        checkedTrackColor = PrimaryGreen,
+                        uncheckedThumbColor = Color.Gray,
+                        uncheckedTrackColor = SurfaceLight,
+                        uncheckedBorderColor = Color.Transparent
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(), 
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Show Mode and Resolution", color = Color.White, fontWeight = FontWeight.Bold)
+                Switch(
+                    checked = showModeText,
+                    onCheckedChange = {
+                        showModeText = it
+                        settings.showModeText = it
                         onSettingsChanged()
                     },
                     colors = SwitchDefaults.colors(

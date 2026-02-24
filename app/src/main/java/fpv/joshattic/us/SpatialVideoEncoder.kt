@@ -268,12 +268,10 @@ class SpatialVideoEncoder(
 
         GLES20.glUseProgram(programId)
 
-        // Draw Left
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, leftTextureId)
         drawQuad(leftVertexBuffer, leftTransformMatrix)
 
-        // Draw Right
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, rightTextureId)
         drawQuad(rightVertexBuffer, rightTransformMatrix)
