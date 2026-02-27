@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
     <uses-permission android:name="horizonos.permission.SPATIAL_CAMERA" />
+    <uses-feature android:name="com.oculus.feature.BOUNDARYLESS_APP" android:required="true" />
 
     <application
         android:allowBackup="true"
