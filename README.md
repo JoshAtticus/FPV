@@ -13,4 +13,4 @@ FPV is a camera app for the Quest 3 (and possibly the Quest 3s, but this is unte
 - Settings page for resolution, bitrate, audio quality, app settings etc
 
 ## Download 
-https://github.com/JoshAtticus/FPV/releases/latest
+Get it from [GitHub Releases](https://github.com/JoshAtticus/FPV/releases/latest) or [Sidequest](https://sidequestvr.com/app/54561/fpv)
